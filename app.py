@@ -1,5 +1,6 @@
 """智能旅行助手 — Streamlit Web 界面。"""
 import asyncio
+import uuid
 from datetime import date
 
 import streamlit as st
@@ -38,17 +39,50 @@ st.markdown("""
         background: #FFF8E1; border-radius: 10px; padding: 1rem; margin: 0.5rem 0;
         color: #1a1a1a;
     }
+    .memory-badge {
+        background: #E8F5E9; border-radius: 6px; padding: 0.3rem 0.6rem;
+        font-size: 0.85rem; color: #2E7D32; display: inline-block; margin: 0.3rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ---- 初始化 ----
-@st.cache_resource
 def get_planner():
-    from config import CONFIG
-    from agents.planner import TripPlanner
-    llm = CONFIG.create_llm()
-    return TripPlanner(llm)
+    if "planner" not in st.session_state:
+        from config import CONFIG
+        from agents.planner import TripPlanner
+        # 初始化 LangSmith（如已配置）
+        from monitor.langsmith_ import init_langsmith
+        init_langsmith()
+        llm = CONFIG.create_llm()
+        st.session_state.planner = TripPlanner(llm)
+    return st.session_state.planner
+
+
+def get_user_id() -> str:
+    """获取或生成持久化的用户 ID"""
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = f"web_user_{uuid.uuid4().hex[:12]}"
+    return st.session_state.user_id
+
+
+def get_session_id() -> str:
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = f"web_session_{uuid.uuid4().hex[:12]}"
+    return st.session_state.session_id
+
+
+def get_memory_preferences(user_id: str) -> dict:
+    """加载用户长期偏好（用于侧边栏回填）"""
+    try:
+        from config import CONFIG
+        from memory.store import UserProfileStore
+        store = UserProfileStore(CONFIG.memory_db_path)
+        prefs = store.get_preferences(user_id)
+        return prefs.to_dict()
+    except Exception:
+        return {}
 
 
 # ---- 辅助: 构建 prompt ----
@@ -61,7 +95,7 @@ def build_prompt(
     preferences: list[str],
     extra: str,
 ) -> str:
-    days = (end_date - start_date).days
+    days = (end_date - start_date).days + 1
     parts = [
         f"{city}{days}日游",
         f"{start_date.strftime('%Y年%m月%d日')}-{end_date.strftime('%Y年%m月%d日')}",
@@ -78,30 +112,32 @@ def build_prompt(
     return "，".join(parts)
 
 
-# ---- 辅助: 转换流式事件 ----
-_SILENCE_NAMES = {"maps_weather", "maps_text_search", "maps_search_detail",
-                   "maps_direction_walking", "maps_direction_driving",
-                   "maps_direction_transit_integrated", "maps_direction_bicycling",
-                   "maps_distance", "maps_geo", "maps_regeocode",
-                   "maps_ip_location", "maps_around_search",
-                   "maps_schema_personal_map", "maps_schema_navi",
-                   "maps_schema_take_taxi"}
-
-_STREAM_LABELS = {
-    "query_weather":     "🌤️ 查询天气中...",
-    "search_hotel":      "🏨 搜索酒店中...",
-    "search_attraction": "🏛️ 搜索景点中...",
-    "maps_direction_walking_by_address":             "🚶 规划步行路线...",
-    "maps_direction_driving_by_address":             "🚗 规划驾车路线...",
-    "maps_direction_transit_integrated_by_address":  "🚌 规划公交路线...",
-}
-
 # ---- 主 UI ----
 st.markdown('<div class="main-header">🧳 智能旅行助手</div>', unsafe_allow_html=True)
 
 # ============ 侧边栏: 参数输入 ============
 with st.sidebar:
     st.markdown("### 📋 旅行参数")
+
+    # ---- 长期记忆状态显示 ----
+    user_id = get_user_id()
+    session_id = get_session_id()
+    mem_prefs = get_memory_preferences(user_id)
+    has_memory = any(v for v in mem_prefs.values() if v)
+    if has_memory:
+        prefs_summary = []
+        if mem_prefs.get("interests"):
+            prefs_summary.append(f"兴趣: {'、'.join(mem_prefs['interests'][:3])}")
+        if mem_prefs.get("transport"):
+            prefs_summary.append(f"交通: {'、'.join(mem_prefs['transport'][:2])}")
+        if mem_prefs.get("hotel_type"):
+            prefs_summary.append(f"住宿: {mem_prefs['hotel_type']}")
+        if mem_prefs.get("budget_level") and mem_prefs['budget_level'] != "中等":
+            prefs_summary.append(f"预算: {mem_prefs['budget_level']}")
+        st.markdown(
+            f'<div class="memory-badge">🧠 长期记忆已加载 | {" | ".join(prefs_summary)}</div>',
+            unsafe_allow_html=True,
+        )
 
     city = st.text_input("📍 目的地城市", placeholder="例如: 杭州、成都、三亚...")
 
@@ -112,7 +148,7 @@ with st.sidebar:
         end_date = st.date_input("📅 结束日期", value=date.today())
 
     if start_date and end_date and end_date >= start_date:
-        trip_days = (end_date - start_date).days
+        trip_days = (end_date - start_date).days + 1
         st.info(f"📌 共计 **{trip_days}** 天")
     elif end_date < start_date:
         st.error("结束日期不能早于开始日期")
@@ -161,6 +197,8 @@ if "plan_data" not in st.session_state:
     st.session_state.plan_data = None
 if "plan_raw" not in st.session_state:
     st.session_state.plan_raw = ""
+if "plan_parse_error" not in st.session_state:
+    st.session_state.plan_parse_error = False
 
 # 未开始时的引导页
 if not submit_btn and st.session_state.plan_data is None:
@@ -192,14 +230,16 @@ if submit_btn:
         # 流式输出区域
         try:
             with st.spinner("🤖 AI 正在为您规划旅行方案..."):
-                from render import parse_plan
+                from render import is_status_update, parse_plan
 
                 stream_placeholder = st.empty()
                 status_placeholder = st.empty()
 
                 async def _collect():
                     results = []
-                    async for token in planner.stream(prompt):
+                    async for token in planner.stream(
+                        prompt, user_id=user_id, session_id=session_id
+                    ):
                         results.append(token)
                     return results
 
@@ -211,7 +251,7 @@ if submit_btn:
                 for token in tokens:
                     full_text += token
                     stripped = token.strip()
-                    if any(stripped.startswith(emoji) for emoji in ["🌤️", "🏨", "🏛️", "🚶", "🚗", "🚌"]):
+                    if is_status_update(token):
                         status_lines.append(stripped)
 
                 # 显示状态
@@ -225,8 +265,10 @@ if submit_btn:
                 st.session_state.plan_data = plan
                 st.session_state.plan_raw = full_text
                 st.session_state.status_lines = status_lines
+                st.session_state.plan_parse_error = plan is None
 
-            st.rerun()
+            if not st.session_state.plan_parse_error:
+                st.rerun()
             
         except Exception as e:
             st.error(f"❌ 发生错误: {str(e)}")
@@ -234,6 +276,11 @@ if submit_btn:
 
 
 # ============ 结果展示 ============
+if st.session_state.plan_parse_error:
+    st.error("❌ 旅行计划 JSON 解析失败，请重试或查看模型原始输出。")
+    with st.expander("📄 模型原始输出", expanded=True):
+        st.text(st.session_state.plan_raw or "")
+
 plan = st.session_state.plan_data
 if plan is not None:
     # 显示状态

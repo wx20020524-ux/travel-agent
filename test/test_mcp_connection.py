@@ -11,7 +11,7 @@ async def test_mcp_connection():
     
     try:
         from config import CONFIG
-        from mcp_client import McpClientManager
+        from mcptools.mcp_client import McpClientManager
         
         print("\n[1] 加载配置...")
         print(f"    API Key 前缀: {CONFIG.api_key[:15]}...")

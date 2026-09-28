@@ -16,6 +16,8 @@ build/
 venv/
 ENV/
 env/
+.venv/
+.pip-tmp/
 
 # IDE
 .idea/
@@ -32,6 +34,14 @@ Thumbs.db
 *.log
 logs/
 
-# Temp files
+# Local runtime data
+data/
+vectorstore/
+*.db
+__patch_test.txt
+.pytest_cache/
+tmp*/
+
+# Temp
 *.tmp
 *.temp

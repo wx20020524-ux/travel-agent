@@ -6,6 +6,8 @@ from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
+from monitor.trace import current_trace, Span
+
 
 class SpecialistAgent:
     """
@@ -40,12 +42,26 @@ class SpecialistAgent:
             )
 
     async def invoke(self, user_input: str) -> str:
-        """非流式调用"""
+        """非流式调用（带链路追踪 span）"""
         await self.build()
-        result = await self._agent.ainvoke({
-            "messages": [{"role": "user", "content": user_input}]
-        })
-        return result["messages"][-1].content
+        trace = current_trace()
+        span: Span | None = None
+        try:
+            if trace:
+                span = trace.start_span(
+                    f"Specialist.{self.name}",
+                    metadata={"agent_type": self.name, "query": (user_input or "")[:100]},
+                )
+            result = await self._agent.ainvoke({
+                "messages": [{"role": "user", "content": user_input}]
+            })
+            if span:
+                span.end(success=True)
+            return result["messages"][-1].content
+        except Exception as e:
+            if span and not span._ended:
+                span.end(success=False, error=str(e)[:200])
+            raise
 
     async def stream(self, user_input: str):
         """

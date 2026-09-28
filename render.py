@@ -2,30 +2,95 @@
 import json
 
 
+def _extract_balanced_json(text: str, search_from: int = 0) -> tuple[str, int] | None:
+    """提取从 search_from 开始的第一个平衡 JSON 对象。"""
+    start = text.find("{", search_from)
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index in range(start, len(text)):
+        char = text[index]
+        if escaped:
+            escaped = False
+            continue
+
+        if in_string:
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1], index + 1
+
+    return None
+
+
 def parse_plan(text: str) -> dict | None:
     """从混合文本中提取并解析旅行计划 JSON。"""
     try:
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start == -1 or end == 0:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    search_from = 0
+    while True:
+        extracted = _extract_balanced_json(text, search_from)
+        if extracted is None:
             return None
-        return json.loads(text[start:end])
-    except (json.JSONDecodeError, KeyError):
-        return None
+
+        candidate, search_from = extracted
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+
+
+
+STATUS_PREFIXES = (
+    "[RAG]",
+    "[Weather]",
+    "[Hotel]",
+    "[Attraction]",
+    "[Walk]",
+    "[Drive]",
+    "[Transit]",
+)
+
+
+def is_status_update(token: str) -> bool:
+    """判断流式输出中的 token 是否是工具状态行。"""
+    return token.strip().startswith(STATUS_PREFIXES)
 
 
 # ==================== CLI 格式化 ====================
 
 def _weather_icon(weather: str) -> str:
+    """天气文字 -> 纯文本图标（兼容 Windows GBK）"""
     mapping = {
-        "晴": "☀️", "多云": "⛅", "阴": "☁️",
-        "小雨": "🌧️", "中雨": "🌧️", "大雨": "⛈️", "暴雨": "⛈️",
-        "雪": "❄️", "雾": "🌫️", "霾": "🌫️",
+        "晴": "[Sun]", "多云": "[Cloudy]", "阴": "[Overcast]",
+        "小雨": "[Rain]", "中雨": "[Rain]", "大雨": "[HeavyRain]", "暴雨": "[Storm]",
+        "雪": "[Snow]", "雾": "[Fog]", "霾": "[Haze]",
     }
     for key, icon in mapping.items():
         if key in weather:
             return icon
-    return "🌡️"
+    return "[?]"
 
 
 def format_plan_cli(json_text: str) -> str | None:
@@ -40,24 +105,24 @@ def format_plan_cli(json_text: str) -> str | None:
     end_date = data.get("end_date", "")
 
     lines.append("")
-    lines.append("╔" + "═" * 58 + "╗")
-    title = f"  🌴 {city} {start_date} ~ {end_date} 旅行计划"
-    lines.append(f"║{title:<56}║")
-    lines.append("╚" + "═" * 58 + "╝")
+    lines.append("=" * 60)
+    title = f"  {city} {start_date} ~ {end_date} 旅行计划"
+    lines.append(f"  {title}")
+    lines.append("=" * 60)
 
     # 天气
     weather_info = data.get("weather_info", [])
     if weather_info:
         lines.append("")
-        lines.append("🌤️  天气概况")
+        lines.append("[Weather] 天气概况")
         for w in weather_info:
             d = w.get("date", "")[-5:]
             di = _weather_icon(w.get("day_weather", ""))
             ni = _weather_icon(w.get("night_weather", ""))
             lines.append(
-                f"   {d}  {di} {w.get('day_weather', '?')} → "
+                f"   {d}  {di} {w.get('day_weather', '?')} -> "
                 f"{ni} {w.get('night_weather', '?')}  "
-                f"{w.get('day_temp', '?')}°C / {w.get('night_temp', '?')}°C  "
+                f"{w.get('day_temp', '?')}C / {w.get('night_temp', '?')}C  "
                 f"{w.get('wind_direction', '')}{w.get('wind_power', '')}"
             )
 
@@ -67,25 +132,25 @@ def format_plan_cli(json_text: str) -> str | None:
         d = day.get("date", "")[-5:]
         desc = day.get("description", "")
         lines.append("")
-        lines.append("━" * 60)
-        lines.append(f"📅 Day {idx}  {d}  {desc}")
-        lines.append("━" * 60)
+        lines.append("-" * 60)
+        lines.append(f"Day {idx}  {d}  {desc}")
+        lines.append("-" * 60)
 
-        hotel = day.get("hotel", {})
+        hotel = day.get("hotel", {}) or {}
         if hotel.get("name"):
             lines.append(
-                f"  🏨 {hotel['name']}  ★{hotel.get('rating', '')}  "
-                f"¥{hotel.get('estimated_cost', 0)}/晚  |  {hotel.get('address', '')}"
+                f"  [Hotel] {hotel['name']}  *{hotel.get('rating', '')}  "
+                f"Y{hotel.get('estimated_cost', 0)}/晚  |  {hotel.get('address', '')}"
             )
-        lines.append(f"  🚌 {day.get('transportation', '')}")
+        lines.append(f"  [Transit] {day.get('transportation', '')}")
 
         attractions = day.get("attractions", [])
         if attractions:
-            lines.append(f"  🏛️  景点 ({len(attractions)}个):")
+            lines.append(f"  [Attraction] 景点 ({len(attractions)}个):")
             for a in attractions:
                 ticket = a.get("ticket_price", 0)
-                ts = "免费" if ticket == 0 else f"¥{ticket}"
-                lines.append(f"     · {a.get('name', '?')}")
+                ts = "免费" if ticket == 0 else f"Y{ticket}"
+                lines.append(f"     | {a.get('name', '?')}")
                 lines.append(
                     f"       {a.get('address', '')}  |  {a.get('category', '')}  |  "
                     f"游玩约{a.get('visit_duration', 0)}分钟  |  {ts}"
@@ -93,31 +158,31 @@ def format_plan_cli(json_text: str) -> str | None:
 
         meals = day.get("meals", [])
         if meals:
-            lines.append("  🍽️  餐饮:")
+            lines.append("  [Food] 餐饮:")
             for m in meals:
                 mt = {"breakfast": "早", "lunch": "午", "dinner": "晚"}
                 label = mt.get(m.get("type", ""), "餐")
-                lines.append(f"     {label} {m.get('name', '?')}  ¥{m.get('estimated_cost', 0)}")
+                lines.append(f"     {label} {m.get('name', '?')}  Y{m.get('estimated_cost', 0)}")
 
     # 预算
     budget = data.get("budget", {})
     if budget:
         lines.append("")
-        lines.append("━" * 60)
-        lines.append("💰 预算汇总")
+        lines.append("-" * 60)
+        lines.append("[Budget] 预算汇总")
         lines.append(
-            f"   景点: ¥{budget.get('total_attractions', 0):>6}  |  "
-            f"酒店: ¥{budget.get('total_hotels', 0):>6}  |  "
-            f"餐饮: ¥{budget.get('total_meals', 0):>6}  |  "
-            f"交通: ¥{budget.get('total_transportation', 0):>6}"
+            f"   景点: Y{budget.get('total_attractions', 0):>6}  |  "
+            f"酒店: Y{budget.get('total_hotels', 0):>6}  |  "
+            f"餐饮: Y{budget.get('total_meals', 0):>6}  |  "
+            f"交通: Y{budget.get('total_transportation', 0):>6}"
         )
-        lines.append(f"   📊 总计: ¥{budget.get('total', 0):,}")
+        lines.append(f"   总计: Y{budget.get('total', 0):,}")
 
     # 建议
     suggestions = data.get("overall_suggestions", "")
     if suggestions:
         lines.append("")
-        lines.append("💡 旅行建议")
+        lines.append("[Tips] 旅行建议")
         for tip in suggestions.replace("；", ";").split(";"):
             tip = tip.strip()
             if tip:

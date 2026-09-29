@@ -55,15 +55,22 @@ def _patched_subtract(self, resp, prev_resp):
 ChatTongyi.subtract_client_response = _patched_subtract
 # ========== 修复结束 ==========
 
+def _get_dashscope_api_key():
+    key = os.getenv("DASHSCOPE_API_KEY", "")
+    if key:
+        return key
 
+    try:
+        import streamlit as st
+        return st.secrets["DASHSCOPE_API_KEY"]
+    except Exception:
+        return ""
 @dataclass
 class Config:
     """全局配置，单例语义 —— 模块级 CONFIG 实例"""
 
     # API 密钥
-    api_key: str = field(
-        default_factory=lambda: os.getenv("DASHSCOPE_API_KEY", "")
-    )
+    api_key: str = field(default_factory=_get_dashscope_api_key)
 
     # LLM
     model_name: str = field(
